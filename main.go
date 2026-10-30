@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
+	"github.com/cloudwego/eino/components/retriever"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -42,7 +45,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	interview, err := newInterviewGraph(ctx, evaluator, chat)
+	mem, err := newMemory(ctx)
+	if err != nil {
+		log.Printf("不启用历史面试检索：%v", err) // 比如 Redis 没启动，面试照常进行
+	}
+	var memories retriever.Retriever
+	if mem != nil {
+		memories = mem.retriever
+	}
+	interview, err := newInterviewGraph(ctx, evaluator, chat, memories)
+	if err != nil {
+		log.Fatal(err)
+	}
+	docParser, err := newDocParser(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -55,8 +70,15 @@ func main() {
 		if !ok {
 			return
 		}
+		if !idPattern.MatchString(req.User) || !idPattern.MatchString(req.Session) {
+			req.User = "" // 没有合法的用户 / 场次 ID 就不检索历史
+		}
 		t := &turn{Req: req}
-		sr, err := interview.Stream(r.Context(), t)
+		var opts []compose.Option
+		if req.User != "" {
+			opts = append(opts, compose.WithRetrieverOption(searchFilter(req.User, req.Session)))
+		}
+		sr, err := interview.Stream(r.Context(), t, opts...)
 		// 本轮阶段放在响应头里交给前端保存；第一段输出到达时 decide 已执行完。
 		pipe(w, r, sr, err, func() {
 			if t.State.Name == "" {
@@ -79,6 +101,10 @@ func main() {
 		pipe(w, r, sr, err, nil)
 	})
 
+	mux.HandleFunc("POST /api/parse", handleParse(docParser))
+	mux.HandleFunc("POST /api/memory", handleMemory(mem))
+	mux.HandleFunc("DELETE /api/memory", handleMemory(mem))
+
 	log.Printf("listening on %s, model %s", addr, cfg.Model)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
@@ -89,6 +115,15 @@ type request struct {
 	Messages []*schema.Message `json:"messages"`
 	Minutes  int               `json:"minutes"` // 面试已进行的分钟数
 	State    *interviewState   `json:"state"`   // 上一轮返回的阶段，开场时为空
+	Profile  profile           `json:"profile"`
+	User     string            `json:"user"`    // 浏览器生成的用户 ID，用来检索这位用户的历史面试
+	Session  string            `json:"session"` // 本场面试 ID，检索时排除本场
+}
+
+// profile 是候选人提供的事实材料，全文放进提示词。
+type profile struct {
+	Resume string `json:"resume"` // 简历
+	JD     string `json:"jd"`     // 目标职位描述
 }
 
 type setup struct {
@@ -104,6 +139,8 @@ func decode(w http.ResponseWriter, r *http.Request) (request, bool) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return req, false
 	}
+	req.Profile.Resume = clip(strings.TrimSpace(req.Profile.Resume), maxProfileRunes)
+	req.Profile.JD = clip(strings.TrimSpace(req.Profile.JD), maxProfileRunes)
 	return req, true
 }
 

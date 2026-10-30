@@ -55,6 +55,10 @@ summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
 .record:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgb(79 124 255 / .15); }
 .record > div { flex: 1; min-width: 0; }
 .record .muted { font-size: 14px; }
+.material { padding: 20px 0 0; }
+.material:last-child { padding-bottom: 40px; }
+.material > div { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.material textarea { width: 100%; min-height: 180px; resize: vertical; }
 #top { position: fixed; right: max(16px, calc(50vw - 340px)); bottom: 96px; width: 44px; padding: 0; box-shadow: 0 2px 10px rgb(30 41 59 / .12); animation: pop .35s var(--spring); }
 
 @keyframes pop { from { opacity: 0; transform: scale(.9) translateY(8px); } }
@@ -65,13 +69,17 @@ summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
 <main>
   <nav>
     <button class="brand" data-go="home">AI 面试官</button>
-    <button class="link" data-go="history">历史记录</button>
+    <span>
+      <button class="link" data-go="profile">我的资料</button>
+      <button class="link" data-go="history">历史记录</button>
+    </span>
   </nav>
 
   <section id="start" class="center">
     <h1>AI 面试官</h1>
     <p class="muted">像真人一样面你一场，结束后告诉你哪里答得不好。</p>
     <div><button class="primary" data-go="step">开始</button></div>
+    <p class="muted" id="profile-status"></p>
   </section>
 
   <section id="step" class="center" hidden>
@@ -101,8 +109,21 @@ summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
     </details>
   </section>
 
+  <section id="profile" hidden>
+    <header><strong>我的资料</strong><span class="muted">面试官会据此提问，只保存在这个浏览器里</span></header>
+    <div class="material">
+      <div><strong>简历</strong><button class="link" data-upload="resume">上传 PDF / Word / 文本</button></div>
+      <textarea id="resume" placeholder="上传简历文件，或者直接粘贴简历内容"></textarea>
+    </div>
+    <div class="material">
+      <div><strong>目标职位描述</strong><button class="link" data-upload="jd">上传文件</button></div>
+      <textarea id="jd" placeholder="粘贴想投的职位描述（JD），面试官会对照里面的要求来考察"></textarea>
+    </div>
+    <input type="file" id="file" accept=".pdf,.docx,.txt,.md" hidden>
+  </section>
+
   <section id="history" hidden>
-    <header><strong>历史记录</strong><span class="muted">只保存在这个浏览器里</span></header>
+    <header><strong>历史记录</strong><span class="muted">问答会存入知识库，供以后的面试参考</span></header>
     <div id="history-list"></div>
   </section>
 </main>
@@ -131,7 +152,8 @@ document.addEventListener('click', e => {
   if (visible('chat') && !leaveChat()) return;
   controller?.abort(); // 离开复盘页时停止生成
   if (go === 'step') { setup = { domain: '' }; renderStep(0); }
-  if (go === 'home') show('start');
+  if (go === 'home') renderStart();
+  if (go === 'profile') show('profile');
   if (go === 'history') renderHistory();
 });
 
@@ -141,6 +163,7 @@ function leaveChat() {
   controller?.abort();
   clearInterval(timer);
   saveSession();
+  if (answers(session)) remember(session);
   return true;
 }
 
@@ -181,7 +204,7 @@ function renderStep(i) {
 function startInterview() {
   messages = [];
   state = null;
-  session = { id: Date.now().toString(36), at: Date.now(), setup, messages: [], seconds: 0 };
+  session = { id: Date.now().toString(36), at: Date.now(), setup, profile: loadProfile(), messages: [], seconds: 0 };
   $('stage').textContent = '';
   $('log').replaceChildren();
   $('input').disabled = false;
@@ -249,7 +272,8 @@ async function ask() {
   const div = bubble('assistant', '…');
   const msg = { role: 'assistant', content: '' };
   messages.push(msg);
-  const body = { setup, state, messages: messages.filter(m => m.content), minutes: Math.floor((Date.now() - startedAt) / 60000) };
+  const body = { setup, state, profile: session.profile, user: USER, session: session.id,
+    messages: messages.filter(m => m.content), minutes: Math.floor((Date.now() - startedAt) / 60000) };
   const { text } = await streamTo('/api/chat', body, t => {
     if (msg.cut) return;
     msg.content = t;
@@ -309,8 +333,9 @@ async function renderReview(s) {
   if (s.report) { $('report').textContent = s.report; return; }
   if (!answers(s)) { $('report').textContent = '这场面试你还没有回答任何问题，没有可复盘的内容。'; return; }
   $('report').textContent = '正在生成复盘…';
-  const { text, ok } = await streamTo('/api/review', { setup: s.setup, messages: s.messages }, t => { $('report').textContent = t; });
+  const { text, ok } = await streamTo('/api/review', { setup: s.setup, profile: s.profile || {}, messages: s.messages }, t => { $('report').textContent = t; });
   if (ok && text) { s.report = text; putHistory(s); }
+  remember(s); // 有没有复盘都写入，复盘生成后再写一次会覆盖
 }
 
 // ---- 历史记录：存在 localStorage，后端不保存 ----
@@ -322,8 +347,12 @@ function loadHistory() {
   try { return JSON.parse(localStorage.getItem(STORE)) || []; } catch { return []; }
 }
 
+// 更新已有记录时保持原位置，新记录放最前。
 function putHistory(s) {
-  const list = [s, ...loadHistory().filter(x => x.id !== s.id)].slice(0, 50);
+  const list = loadHistory();
+  const i = list.findIndex(x => x.id === s.id);
+  if (i >= 0) list[i] = s; else list.unshift(s);
+  list.splice(50);
   try { localStorage.setItem(STORE, JSON.stringify(list)); } catch {}
 }
 
@@ -357,6 +386,7 @@ function renderHistory() {
       e.stopPropagation();
       if (!confirm('删除这条面试记录？')) return;
       try { localStorage.setItem(STORE, JSON.stringify(loadHistory().filter(x => x.id !== s.id))); } catch {}
+      fetch(`/api/memory?user=${USER}&session=${s.id}`, { method: 'DELETE' }).catch(() => {});
       renderHistory();
     };
     item.append(info, del);
@@ -366,6 +396,89 @@ function renderHistory() {
   if (!list.length) $('history-list').textContent = '还没有面试记录。';
   show('history');
 }
+
+// ---- 我的资料：简历和职位描述，存在 localStorage，每次面试随请求发给后端 ----
+
+const PROFILE = 'ai-interviewer:profile';
+
+function loadProfile() {
+  try { return JSON.parse(localStorage.getItem(PROFILE)) || { resume: '', jd: '' }; } catch { return { resume: '', jd: '' }; }
+}
+
+function saveProfile() {
+  try { localStorage.setItem(PROFILE, JSON.stringify({ resume: $('resume').value.trim(), jd: $('jd').value.trim() })); } catch {}
+}
+
+$('resume').oninput = $('jd').oninput = saveProfile;
+
+let uploadTarget;
+document.addEventListener('click', e => {
+  if (!e.target.dataset?.upload) return;
+  uploadTarget = e.target.dataset.upload;
+  $('file').value = '';
+  $('file').click();
+});
+
+$('file').onchange = async () => {
+  const f = $('file').files[0];
+  if (!f) return;
+  const box = $(uploadTarget), before = box.value;
+  box.value = `正在读取 ${f.name}…`;
+  box.disabled = true;
+  try {
+    const form = new FormData();
+    form.append('file', f);
+    const res = await fetch('/api/parse', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    box.value = (await res.json()).text;
+  } catch (e) {
+    box.value = before;
+    alert('读取失败：' + e.message);
+  }
+  box.disabled = false;
+  saveProfile();
+};
+
+function renderStart() {
+  const p = loadProfile();
+  const has = [p.resume && '简历', p.jd && '职位描述'].filter(Boolean);
+  $('profile-status').textContent = has.length
+    ? `面试官会参考你的${has.join('和')}。`
+    : '先在「我的资料」里放上简历和职位描述，面试会更贴近你。';
+  show('start');
+}
+
+// ---- 面试记忆：每场面试切块、向量化后存进后端的向量库，以后面试时检索 ----
+
+// 浏览器生成的匿名用户 ID，用来区分谁的历史面试。
+const USER = (() => {
+  const KEY = 'ai-interviewer:user';
+  let id;
+  try { id = localStorage.getItem(KEY); } catch {}
+  if (!/^[a-z0-9]{1,40}$/.test(id || '')) {
+    id = crypto.randomUUID().replaceAll('-', '');
+    try { localStorage.setItem(KEY, id); } catch {}
+  }
+  return id;
+})();
+
+// 写入向量库；成功后标记 indexed，失败（比如后端没开检索）下次打开页面再试。
+async function remember(s) {
+  const body = { id: s.id, at: s.at, setup: s.setup, messages: s.messages, report: s.report || '' };
+  try {
+    const res = await fetch(`/api/memory?user=${USER}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) return;
+    const saved = loadHistory().find(x => x.id === s.id);
+    if (saved) { saved.indexed = !!s.report; putHistory(saved); }
+  } catch {}
+}
+
+// 打开页面时，把还没写入（或写入时还没有复盘）的历史补写进去。
+for (const s of loadHistory()) if (!s.indexed && answers(s)) remember(s);
+
+$('resume').value = loadProfile().resume;
+$('jd').value = loadProfile().jd;
+renderStart();
 </script>
 </body>
 </html>

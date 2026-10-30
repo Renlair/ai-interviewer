@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -46,21 +47,29 @@ type evaluation struct {
 // turn 是一轮面试在图中流转的数据。
 // decide 节点写入 State，handler 收到第一段输出后读取它：此时 decide 一定已经执行完。
 type turn struct {
-	Req   request
-	State interviewState
-	Eval  evaluation
-	Moved bool // 本轮是否进入了新阶段
+	Req      request
+	State    interviewState
+	Eval     evaluation
+	Moved    bool               // 本轮是否进入了新阶段
+	Memories []*schema.Document // 检索到的历史面试片段
 }
 
 type turnRef struct{ t *turn }
 
 // newInterviewGraph 编排一轮面试：
 //
-//	START ─有回答─▶ eval_prompt ▶ evaluate ▶ parse_eval ─▶ decide ▶ interviewer ▶ END
-//	  └─────开场，无需评估──────────────────────────────┘
-func newInterviewGraph(ctx context.Context, evaluator, interviewer model.BaseChatModel) (compose.Runnable[*turn, *schema.Message], error) {
-	// 评估分支要把 *turn 带过模型节点，借图的局部状态暂存。
+//	START ─有回答─▶ query ▶ retrieve ▶ remember ─▶ eval_prompt ▶ evaluate ▶ parse_eval ─▶ decide ▶ interviewer ▶ END
+//	  │      └─未启用历史检索─────────────────────┘                                   │
+//	  └─────开场，无需评估────────────────────────────────────────────────────────────┘
+//
+// memories 为 nil 时不检索历史面试。
+func newInterviewGraph(ctx context.Context, evaluator, interviewer model.BaseChatModel, memories retriever.Retriever) (compose.Runnable[*turn, *schema.Message], error) {
+	// 评估分支要把 *turn 带过模型和检索节点，借图的局部状态暂存。
 	g := compose.NewGraph[*turn, *schema.Message](compose.WithGenLocalState(func(context.Context) *turnRef { return &turnRef{} }))
+	saved := func(ctx context.Context) (t *turn, err error) {
+		err = compose.ProcessState(ctx, func(_ context.Context, s *turnRef) error { t = s.t; return nil })
+		return t, err
+	}
 
 	_ = g.AddLambdaNode("eval_prompt", compose.InvokableLambda(func(ctx context.Context, t *turn) ([]*schema.Message, error) {
 		err := compose.ProcessState(ctx, func(_ context.Context, s *turnRef) error { s.t = t; return nil })
@@ -68,8 +77,8 @@ func newInterviewGraph(ctx context.Context, evaluator, interviewer model.BaseCha
 	}))
 	_ = g.AddChatModelNode("evaluate", evaluator)
 	_ = g.AddLambdaNode("parse_eval", compose.InvokableLambda(func(ctx context.Context, m *schema.Message) (*turn, error) {
-		var t *turn
-		if err := compose.ProcessState(ctx, func(_ context.Context, s *turnRef) error { t = s.t; return nil }); err != nil {
+		t, err := saved(ctx)
+		if err != nil {
 			return nil, err
 		}
 		if jerr := json.Unmarshal([]byte(stripFence(m.Content)), &t.Eval); jerr != nil {
@@ -83,12 +92,39 @@ func newInterviewGraph(ctx context.Context, evaluator, interviewer model.BaseCha
 	}))
 	_ = g.AddChatModelNode("interviewer", interviewer)
 
+	if memories != nil {
+		// 用最近一问一答去检索，比只用回答更能命中同一话题。
+		_ = g.AddLambdaNode("query", compose.InvokableLambda(func(ctx context.Context, t *turn) (string, error) {
+			err := compose.ProcessState(ctx, func(_ context.Context, s *turnRef) error { s.t = t; return nil })
+			recent := transcript(t.Req.Messages)
+			return clip(transcriptText(recent[max(len(recent)-2, 0):]), 500), err
+		}))
+		_ = g.AddRetrieverNode("retrieve", softRetriever{memories})
+		_ = g.AddLambdaNode("remember", compose.InvokableLambda(func(ctx context.Context, docs []*schema.Document) (*turn, error) {
+			t, err := saved(ctx)
+			if t != nil {
+				t.Memories = docs
+			}
+			return t, err
+		}))
+		_ = g.AddEdge("query", "retrieve")
+		_ = g.AddEdge("retrieve", "remember")
+		_ = g.AddEdge("remember", "eval_prompt")
+	}
+
+	ends := map[string]bool{"eval_prompt": true, "decide": true}
+	if memories != nil {
+		ends["query"] = true
+	}
 	_ = g.AddBranch(compose.START, compose.NewGraphBranch(func(_ context.Context, t *turn) (string, error) {
-		if hasUserMessage(t.Req.Messages) {
-			return "eval_prompt", nil
+		switch {
+		case !hasUserMessage(t.Req.Messages):
+			return "decide", nil
+		case memories != nil && t.Req.User != "":
+			return "query", nil
 		}
-		return "decide", nil
-	}, map[string]bool{"eval_prompt": true, "decide": true}))
+		return "eval_prompt", nil
+	}, ends))
 	_ = g.AddEdge("eval_prompt", "evaluate")
 	_ = g.AddEdge("evaluate", "parse_eval")
 	_ = g.AddEdge("parse_eval", "decide")

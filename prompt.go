@@ -53,19 +53,51 @@ func evaluatorMessages(t *turn) []*schema.Message {
 
 	return []*schema.Message{
 		schema.SystemMessage(fmt.Sprintf(`你在旁听一场%s方向的面试，帮面试官判断进度。候选人阶段：%s。
-
+%s
 当前阶段：%s。阶段目标：%s
 候选人在本阶段已经回答了 %d 轮（不含最新一条）。
-
+%s
 根据最近的对话，只输出一个 JSON 对象，不要输出其他内容：
 {"stage_done": 布尔值, "wants_to_end": 布尔值, "focus": "字符串"}
 
 - stage_done：本阶段目标是否已经达成，可以进入下一阶段。候选人的回答还有明显值得追问的地方时为 false。
 - wants_to_end：候选人是否明确表示想结束面试。
-- focus：面试官下一问最该抓住的点，一句话，比如候选人回答里的含糊之处、没说清的取舍、或者候选人提出的问题。`,
-			t.Req.Setup.Role, t.Req.Setup.Level, cur.Name, cur.Goal, s.Turns)),
+- focus：面试官下一问最该抓住的点，一句话，比如候选人回答里的含糊之处、没说清的取舍、和简历或以前说法对不上的地方、职位要求里还没考察到的能力、或者候选人提出的问题。`,
+			t.Req.Setup.Role, t.Req.Setup.Level, profileBlock(t.Req.Profile), cur.Name, cur.Goal, s.Turns, memoriesBlock(t.Memories))),
 		schema.UserMessage(transcriptText(recent)),
 	}
+}
+
+// profileBlock 把简历和职位描述原文交给模型。放在提示词前部且每轮不变，便于模型服务缓存前缀。
+func profileBlock(p profile) string {
+	if p.Resume == "" && p.JD == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n以下是候选人提供的材料，是这场面试的事实依据：\n")
+	if p.Resume != "" {
+		fmt.Fprintf(&b, "\n【候选人简历】\n%s\n", p.Resume)
+	}
+	if p.JD != "" {
+		fmt.Fprintf(&b, "\n【目标职位描述】\n%s\n", p.JD)
+	}
+	return b.String()
+}
+
+var memoryKinds = map[string]string{"qa": "问答", "report": "复盘"}
+
+// memoriesBlock 列出检索到的历史面试片段。
+func memoriesBlock(docs []*schema.Document) string {
+	if len(docs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n这位候选人以前面试中和当前话题相关的片段（仅供参考，和当前话题无关就忽略）：\n")
+	for _, d := range docs {
+		fmt.Fprintf(&b, "- [%v %v · %s] %s\n", d.MetaData["date"], d.MetaData["role"], memoryKinds[fmt.Sprint(d.MetaData["kind"])],
+			strings.ReplaceAll(d.Content, "\n", " / "))
+	}
+	return b.String()
 }
 
 // roleFocus 是每个面试方向重点考察的内容；前端的方向选项要和这里的 key 一致。
@@ -113,13 +145,20 @@ func interviewerPrompt(t *turn) string {
 		fmt.Fprintf(&now, "旁听的同事建议这一问抓住：%s\n", t.Eval.Focus)
 	}
 
+	material := profileBlock(t.Req.Profile)
+	if material != "" {
+		material += "\n用法：从简历里挑经历来问，对照职位描述的要求考察。简历上写的成果要追问细节核实，不要照着简历念，也不要一开口就复述简历。\n"
+	}
+	if m := memoriesBlock(t.Memories); m != "" {
+		now.WriteString(m)
+		now.WriteString("用法：不要重复以前问过的问题；以前答得弱的点可以换个角度再考察，看看有没有进步；和以前说法矛盾的地方可以追问。可以自然地提一句\"上次聊到……\"，但不要逐条复述。\n")
+	}
+
+	// 不变的部分在前、每轮变化的部分在后，便于模型服务缓存提示词前缀。
 	return fmt.Sprintf(`你是一位资深面试官，正在面一位%s方向的候选人。候选人阶段：%s。业务领域：%s。
 
 这个方向重点考察：%s
 不考记忆型的知识点和八股文。技术细节只在能看出候选人思考深度时追问，更看重他是否理解业务、能否做出有理由的判断。问题的难度和期待要符合候选人的阶段。
-
-这是一场约 %d 分钟的文字面试，现在已经进行了 %d 分钟。面试分为：了解候选人、经历深挖、情景题、反问、收尾，阶段切换由系统控制，你只需要专注当前阶段。
-
 %s
 规则：
 - 像真人面试官说话：口语、简短，每次只问一个问题，不要列清单，不要用 Markdown。
@@ -128,14 +167,18 @@ func interviewerPrompt(t *turn) string {
 - 面试中不要讲解、不要给答案、不要打分，这些留到复盘。
 - 候选人主动提问或换了话题（比如问职业规划），先认真回应，再顺势把话题带回面试，不要无视问题、生硬地按自己的节奏走。
 - 候选人可能打断你：你上一条消息可能只说了一半，直接回应候选人新说的话即可。
-- 只有在收尾阶段才输出 [END]。`,
-		s.Role, s.Level, domain, focus, interviewMinutes, t.Req.Minutes, now.String())
+- 只有在收尾阶段才输出 [END]。
+
+这是一场约 %d 分钟的文字面试，现在已经进行了 %d 分钟。面试分为：了解候选人、经历深挖、情景题、反问、收尾，阶段切换由系统控制，你只需要专注当前阶段。
+
+%s`,
+		s.Role, s.Level, domain, focus, material, interviewMinutes, t.Req.Minutes, now.String())
 }
 
 // reviewMessages 把整场对话作为一份记录交给复盘教练。
 func reviewMessages(req request) []*schema.Message {
 	return []*schema.Message{
-		schema.SystemMessage(reviewPrompt),
+		schema.SystemMessage(reviewPrompt + profileBlock(req.Profile)),
 		schema.UserMessage(transcriptText(transcript(req.Messages))),
 	}
 }
@@ -148,6 +191,8 @@ const reviewPrompt = `你是一位面试复盘教练。下面是一场面试的�
 - 理由：候选人答得好和不好的地方，具体到回答内容，重点看业务理解和判断是否有理有据
 - 更好的答法：给出一段可以直接参考的回答
 最后列出最该优先补的三个弱项。
+
+如果提供了职位描述，最后再对照职位要求，指出候选人还有哪些差距。
 
 只点评候选人实际回答过的问题，不要编造没发生的内容。候选人回答很少时，报告也要相应简短，只写几句话说明能看出的情况。
 
