@@ -208,6 +208,10 @@ $('end').onclick = async () => {
   $('input').disabled = false;
   $('end').textContent = '结束面试';
   show('review');
+  if (!messages.some(m => m.role === 'user')) {
+    $('report').textContent = '这场面试你还没有回答任何问题，没有可复盘的内容。';
+    return;
+  }
   $('report').textContent = '正在生成复盘…';
   await streamTo('/api/review', t => { $('report').textContent = t; });
 };
