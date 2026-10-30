@@ -12,7 +12,12 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "PingFang SC", sans-serif; }
-main { max-width: 680px; margin: 0 auto; padding: 0 16px; min-height: 100vh; display: flex; flex-direction: column; }
+/* 整页固定一屏高：顶部导航不动，每个页面在自己的区域里滚动。 */
+main { max-width: 680px; margin: 0 auto; padding: 0 16px; height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+main > section { flex: 1; min-height: 0; overflow-y: auto; }
+nav { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+nav .brand { border: none; background: none; padding: 10px 0; font-weight: 700; }
+nav .brand:hover:not(:disabled) { box-shadow: none; color: var(--accent); }
 main > section { animation: pop .5s var(--spring); }
 .center { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 24px; }
 h1 { font-size: 30px; margin: 0; font-weight: 700; }
@@ -29,8 +34,8 @@ button:disabled { opacity: .4; cursor: default; }
 .link:hover:not(:disabled) { box-shadow: none; color: var(--accent); }
 [hidden] { display: none !important; }
 
-/* 聊天页固定一屏高，只有消息列表滚动，输入框始终在底部。 */
-#chat { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+/* 聊天页只有消息列表滚动，输入框始终在底部。 */
+#chat { display: flex; flex-direction: column; overflow: hidden; }
 header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--line); }
 #log { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 0; display: flex; flex-direction: column; gap: 14px; }
 .msg { white-space: pre-wrap; max-width: 85%; padding: 10px 16px; border-radius: 18px; animation: pop .45s var(--spring); }
@@ -40,7 +45,17 @@ form { padding: 12px 0 16px; display: flex; gap: 8px; align-items: flex-end; }
 textarea { flex: 1; font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 10px 14px; resize: none; outline: none;
   transition: border-color .2s, box-shadow .35s var(--spring); }
 textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
-#report { white-space: pre-wrap; margin: 20px 0 40px; padding: 20px; background: var(--card); border-radius: 18px; box-shadow: 0 2px 10px rgb(30 41 59 / .06); }
+#report { white-space: pre-wrap; margin: 20px 0; padding: 20px; background: var(--card); border-radius: 18px; box-shadow: 0 2px 10px rgb(30 41 59 / .06); }
+details { margin: 0 0 40px; }
+summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
+.transcript { display: flex; flex-direction: column; gap: 14px; padding: 12px 0; }
+#history-list { display: flex; flex-direction: column; gap: 12px; padding: 20px 0 40px; }
+.record { display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: var(--card); border-radius: 18px; box-shadow: 0 2px 10px rgb(30 41 59 / .06); cursor: pointer;
+  transition: transform .35s var(--spring), box-shadow .2s; }
+.record:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgb(79 124 255 / .15); }
+.record > div { flex: 1; min-width: 0; }
+.record .muted { font-size: 14px; }
+#top { position: fixed; right: max(16px, calc(50vw - 340px)); bottom: 96px; width: 44px; padding: 0; box-shadow: 0 2px 10px rgb(30 41 59 / .12); animation: pop .35s var(--spring); }
 
 @keyframes pop { from { opacity: 0; transform: scale(.9) translateY(8px); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
@@ -48,6 +63,11 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent
 </head>
 <body>
 <main>
+  <nav>
+    <button class="brand" data-go="home">AI 面试官</button>
+    <button class="link" data-go="history">历史记录</button>
+  </nav>
+
   <section id="start" class="center">
     <h1>AI 面试官</h1>
     <p class="muted">像真人一样面你一场，结束后告诉你哪里答得不好。</p>
@@ -73,10 +93,20 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent
   </section>
 
   <section id="review" hidden>
-    <header><strong>复盘报告</strong><button data-go="start">再面一场</button></header>
-    <div id="report">正在生成复盘…</div>
+    <header><strong>复盘报告</strong><button data-go="home">再面一场</button></header>
+    <div id="report"></div>
+    <details>
+      <summary id="transcript-title">面试记录</summary>
+      <div class="transcript" id="transcript"></div>
+    </details>
+  </section>
+
+  <section id="history" hidden>
+    <header><strong>历史记录</strong><span class="muted">只保存在这个浏览器里</span></header>
+    <div id="history-list"></div>
   </section>
 </main>
+<button id="top" title="回到顶部" hidden>↑</button>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -86,17 +116,49 @@ const STEPS = [
   { key: 'domain', title: '熟悉或想去的业务领域？', options: ['电商', '金融 / 支付', '企业服务 / SaaS', '内容 / 社区', '本地生活', '教育', '游戏', 'AI 原生应用'], skippable: true },
 ];
 
-let setup, messages, state, startedAt, timer, controller;
+let setup, messages, state, startedAt, timer, controller, session;
 
 function show(id) {
   for (const s of document.querySelectorAll('main > section')) s.hidden = s.id !== id;
+  updateTop();
 }
+
+const visible = id => !$(id).hidden;
 
 document.addEventListener('click', e => {
   const go = e.target.dataset?.go;
+  if (!go) return;
+  if (visible('chat') && !leaveChat()) return;
+  controller?.abort(); // 离开复盘页时停止生成
   if (go === 'step') { setup = { domain: '' }; renderStep(0); }
-  if (go === 'start') show('start');
+  if (go === 'home') show('start');
+  if (go === 'history') renderHistory();
 });
+
+// 面试中离开：确认后结束本场，记录存入历史。返回 false 表示用户取消。
+function leaveChat() {
+  if (messages.some(m => m.role === 'user') && !confirm('离开会结束这场面试，记录会保存到历史。确定离开吗？')) return false;
+  controller?.abort();
+  clearInterval(timer);
+  saveSession();
+  return true;
+}
+
+// ---- 回到顶部 ----
+
+// 当前页面的滚动区域：聊天页是消息列表，其他页面是整个 section。
+function scroller() {
+  return visible('chat') ? $('log') : document.querySelector('main > section:not([hidden])');
+}
+
+function updateTop() {
+  $('top').hidden = !(scroller()?.scrollTop > 300);
+}
+
+document.addEventListener('scroll', updateTop, true); // scroll 不冒泡，用捕获监听所有滚动区域
+$('top').onclick = () => scroller().scrollTo({ top: 0, behavior: 'smooth' });
+
+// ---- 选方向 ----
 
 function renderStep(i) {
   if (i === STEPS.length) return startInterview();
@@ -114,11 +176,16 @@ function renderStep(i) {
   show('step');
 }
 
+// ---- 面试 ----
+
 function startInterview() {
   messages = [];
   state = null;
+  session = { id: Date.now().toString(36), at: Date.now(), setup, messages: [], seconds: 0 };
   $('stage').textContent = '';
   $('log').replaceChildren();
+  $('input').disabled = false;
+  $('end').textContent = '结束面试';
   startedAt = Date.now();
   clearInterval(timer);
   timer = setInterval(() => {
@@ -137,23 +204,28 @@ function follow(update, force) {
   if (force || atBottom) log.scrollTop = log.scrollHeight;
 }
 
-function bubble(role, text) {
+function msgEl(role, text) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   div.textContent = text;
+  return div;
+}
+
+function bubble(role, text) {
+  const div = msgEl(role, text);
   follow(() => $('log').append(div), role === 'user');
   return div;
 }
 
-// 流式请求；返回完整文本。被 abort 时返回已收到的部分。onRes 拿到响应头后调用。
-async function streamTo(path, onText, onRes) {
+// 流式请求。ok 为 false 表示被中止或出错，此时 text 是已收到的部分。onRes 拿到响应头后调用。
+async function streamTo(path, body, onText, onRes) {
   const ctrl = controller = new AbortController();
-  let text = '';
+  let text = '', ok = true;
   try {
     const res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ setup, state, messages: messages.filter(m => m.content), minutes: Math.floor((Date.now() - startedAt) / 60000) }),
+      body: JSON.stringify(body),
       signal: ctrl.signal,
     });
     onRes?.(res);
@@ -166,17 +238,19 @@ async function streamTo(path, onText, onRes) {
       onText(text);
     }
   } catch (e) {
+    ok = false;
     if (e.name !== 'AbortError') onText(text + '\n[网络错误]');
   }
   if (controller === ctrl) controller = null;
-  return text;
+  return { text, ok: ok && !text.includes('[模型调用失败') };
 }
 
 async function ask() {
   const div = bubble('assistant', '…');
   const msg = { role: 'assistant', content: '' };
   messages.push(msg);
-  const text = await streamTo('/api/chat', t => {
+  const body = { setup, state, messages: messages.filter(m => m.content), minutes: Math.floor((Date.now() - startedAt) / 60000) };
+  const { text } = await streamTo('/api/chat', body, t => {
     if (msg.cut) return;
     msg.content = t;
     follow(() => { div.textContent = t.replace('[END]', '').trim(); });
@@ -189,6 +263,7 @@ async function ask() {
   });
   if (msg.cut) return;
   msg.content = text.replace('[END]', '').trim();
+  saveSession();
   if (text.includes('[END]')) {
     $('input').disabled = true;
     $('end').textContent = '查看复盘';
@@ -216,19 +291,81 @@ $('input').onkeydown = e => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('form').requestSubmit(); }
 };
 
-$('end').onclick = async () => {
+$('end').onclick = () => {
   controller?.abort();
   clearInterval(timer);
-  $('input').disabled = false;
-  $('end').textContent = '结束面试';
-  show('review');
-  if (!messages.some(m => m.role === 'user')) {
-    $('report').textContent = '这场面试你还没有回答任何问题，没有可复盘的内容。';
-    return;
-  }
-  $('report').textContent = '正在生成复盘…';
-  await streamTo('/api/review', t => { $('report').textContent = t; });
+  saveSession();
+  renderReview(session);
 };
+
+// ---- 复盘 ----
+
+// 展示一场面试的复盘和对话记录；还没有复盘时生成并保存。
+async function renderReview(s) {
+  show('review');
+  $('transcript-title').textContent = `面试记录（${answers(s)} 轮回答）`;
+  $('transcript').replaceChildren(...s.messages.map(m => msgEl(m.role, m.content)));
+  $('transcript').parentElement.open = false;
+  if (s.report) { $('report').textContent = s.report; return; }
+  if (!answers(s)) { $('report').textContent = '这场面试你还没有回答任何问题，没有可复盘的内容。'; return; }
+  $('report').textContent = '正在生成复盘…';
+  const { text, ok } = await streamTo('/api/review', { setup: s.setup, messages: s.messages }, t => { $('report').textContent = t; });
+  if (ok && text) { s.report = text; putHistory(s); }
+}
+
+// ---- 历史记录：存在 localStorage，后端不保存 ----
+
+const STORE = 'ai-interviewer:history';
+const answers = s => s.messages.filter(m => m.role === 'user').length;
+
+function loadHistory() {
+  try { return JSON.parse(localStorage.getItem(STORE)) || []; } catch { return []; }
+}
+
+function putHistory(s) {
+  const list = [s, ...loadHistory().filter(x => x.id !== s.id)].slice(0, 50);
+  try { localStorage.setItem(STORE, JSON.stringify(list)); } catch {}
+}
+
+// 把当前面试写入历史；一句话都没答的不保存。
+function saveSession() {
+  if (!session || !messages.some(m => m.role === 'user')) return;
+  session.messages = messages.filter(m => m.content).map(({ role, content }) => ({ role, content }));
+  session.seconds = Math.floor((Date.now() - startedAt) / 1000);
+  putHistory(session);
+}
+
+addEventListener('beforeunload', () => { if (visible('chat')) saveSession(); });
+
+function renderHistory() {
+  const list = loadHistory();
+  $('history-list').replaceChildren(...list.map(s => {
+    const item = document.createElement('div');
+    item.className = 'record';
+    const info = document.createElement('div');
+    const title = document.createElement('div');
+    title.textContent = [s.setup.role, s.setup.level, s.setup.domain].filter(Boolean).join(' · ');
+    const meta = document.createElement('div');
+    meta.className = 'muted';
+    const when = new Date(s.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    meta.textContent = `${when} · ${Math.max(1, Math.round(s.seconds / 60))} 分钟 · ${answers(s)} 轮回答 · ${s.report ? '已复盘' : '未复盘'}`;
+    info.append(title, meta);
+    const del = document.createElement('button');
+    del.className = 'link';
+    del.textContent = '删除';
+    del.onclick = e => {
+      e.stopPropagation();
+      if (!confirm('删除这条面试记录？')) return;
+      try { localStorage.setItem(STORE, JSON.stringify(loadHistory().filter(x => x.id !== s.id))); } catch {}
+      renderHistory();
+    };
+    item.append(info, del);
+    item.onclick = () => renderReview(s);
+    return item;
+  }));
+  if (!list.length) $('history-list').textContent = '还没有面试记录。';
+  show('history');
+}
 </script>
 </body>
 </html>
