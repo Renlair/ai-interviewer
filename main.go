@@ -51,9 +51,9 @@ type request struct {
 }
 
 type setup struct {
-	Industry  string `json:"industry"`
-	Primary   string `json:"primary"`
-	Secondary string `json:"secondary"`
+	Role   string `json:"role"`   // 面试方向，如 产品经理、技术架构师
+	Level  string `json:"level"`  // 候选人阶段，如 校招、3-5 年
+	Domain string `json:"domain"` // 业务领域，可为空
 }
 
 type message struct {
