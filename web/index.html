@@ -29,13 +29,14 @@ button:disabled { opacity: .4; cursor: default; }
 .link:hover:not(:disabled) { box-shadow: none; color: var(--accent); }
 [hidden] { display: none !important; }
 
-#chat { flex: 1; display: flex; flex-direction: column; }
+/* 聊天页固定一屏高，只有消息列表滚动，输入框始终在底部。 */
+#chat { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
 header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--line); }
-#log { flex: 1; padding: 20px 0; display: flex; flex-direction: column; gap: 14px; }
+#log { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 0; display: flex; flex-direction: column; gap: 14px; }
 .msg { white-space: pre-wrap; max-width: 85%; padding: 10px 16px; border-radius: 18px; animation: pop .45s var(--spring); }
 .msg.assistant { background: var(--card); box-shadow: 0 2px 10px rgb(30 41 59 / .06); align-self: flex-start; transform-origin: left bottom; border-bottom-left-radius: 6px; }
 .msg.user { background: var(--accent); color: #fff; align-self: flex-end; transform-origin: right bottom; border-bottom-right-radius: 6px; }
-form { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0 16px; display: flex; gap: 8px; align-items: flex-end; }
+form { padding: 12px 0 16px; display: flex; gap: 8px; align-items: flex-end; }
 textarea { flex: 1; font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 10px 14px; resize: none; outline: none;
   transition: border-color .2s, box-shadow .35s var(--spring); }
 textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
@@ -61,7 +62,7 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent
 
   <section id="chat" hidden>
     <header>
-      <span class="muted" id="timer">00:00</span>
+      <span class="muted"><span id="timer">00:00</span> · <span id="stage"></span></span>
       <button id="end">结束面试</button>
     </header>
     <div id="log"></div>
@@ -85,7 +86,7 @@ const STEPS = [
   { key: 'domain', title: '熟悉或想去的业务领域？', options: ['电商', '金融 / 支付', '企业服务 / SaaS', '内容 / 社区', '本地生活', '教育', '游戏', 'AI 原生应用'], skippable: true },
 ];
 
-let setup, messages, startedAt, timer, controller;
+let setup, messages, state, startedAt, timer, controller;
 
 function show(id) {
   for (const s of document.querySelectorAll('main > section')) s.hidden = s.id !== id;
@@ -115,6 +116,8 @@ function renderStep(i) {
 
 function startInterview() {
   messages = [];
+  state = null;
+  $('stage').textContent = '';
   $('log').replaceChildren();
   startedAt = Date.now();
   clearInterval(timer);
@@ -126,26 +129,34 @@ function startInterview() {
   ask();
 }
 
+// 更新消息并滚到底部；用户往上翻看时（离底部较远）不打扰，除非 force。
+function follow(update, force) {
+  const log = $('log');
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  update();
+  if (force || atBottom) log.scrollTop = log.scrollHeight;
+}
+
 function bubble(role, text) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
   div.textContent = text;
-  $('log').append(div);
-  div.scrollIntoView({ block: 'end' });
+  follow(() => $('log').append(div), role === 'user');
   return div;
 }
 
-// 流式请求；返回完整文本。被 abort 时返回已收到的部分。
-async function streamTo(path, onText) {
+// 流式请求；返回完整文本。被 abort 时返回已收到的部分。onRes 拿到响应头后调用。
+async function streamTo(path, onText, onRes) {
   const ctrl = controller = new AbortController();
   let text = '';
   try {
     const res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ setup, messages: messages.filter(m => m.content), minutes: Math.floor((Date.now() - startedAt) / 60000) }),
+      body: JSON.stringify({ setup, state, messages: messages.filter(m => m.content), minutes: Math.floor((Date.now() - startedAt) / 60000) }),
       signal: ctrl.signal,
     });
+    onRes?.(res);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     for (;;) {
@@ -168,8 +179,13 @@ async function ask() {
   const text = await streamTo('/api/chat', t => {
     if (msg.cut) return;
     msg.content = t;
-    div.textContent = t.replace('[END]', '').trim();
-    div.scrollIntoView({ block: 'end' });
+    follow(() => { div.textContent = t.replace('[END]', '').trim(); });
+  }, res => {
+    // 后端每轮返回所处阶段，下一轮原样带回。
+    const h = res.headers.get('X-Interview-State');
+    if (!h) return;
+    state = JSON.parse(decodeURIComponent(h));
+    $('stage').textContent = state.name;
   });
   if (msg.cut) return;
   msg.content = text.replace('[END]', '').trim();

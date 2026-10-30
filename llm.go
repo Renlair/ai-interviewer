@@ -1,71 +1,71 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
+	"log"
 	"net/http"
-	"strings"
+
+	"github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino/schema"
 )
 
-// stream 调用 OpenAI 兼容的 /chat/completions，把增量文本原样写给 w。
-func stream(ctx context.Context, cfg config, msgs []message, w http.ResponseWriter) error {
-	body, _ := json.Marshal(map[string]any{
-		"model":    cfg.Model,
-		"messages": msgs,
-		"stream":   true,
-	})
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		strings.TrimRight(cfg.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return err
+// newChatModel 创建 OpenAI 兼容接口的模型；jsonOut 要求模型只输出 JSON 对象。
+func newChatModel(ctx context.Context, cfg config, temperature float32, jsonOut bool) (*openai.ChatModel, error) {
+	c := &openai.ChatModelConfig{
+		BaseURL:     cfg.BaseURL,
+		APIKey:      cfg.APIKey,
+		Model:       cfg.Model,
+		Temperature: &temperature,
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	if jsonOut {
+		c.ResponseFormat = &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject}
+	}
+	return openai.NewChatModel(ctx, c)
+}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		return fmt.Errorf("%s: %s", resp.Status, b)
-	}
-
+// pipe 把模型的流式输出原样写给前端。onFirst 在写出第一段内容前调用，可以用来设置响应头。
+func pipe(w http.ResponseWriter, r *http.Request, sr *schema.StreamReader[*schema.Message], err error, onFirst func()) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	flusher, _ := w.(http.Flusher)
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		data, ok := strings.CutPrefix(sc.Text(), "data:")
-		if !ok {
-			continue
+	started := false
+	start := func() {
+		if !started && onFirst != nil {
+			onFirst()
 		}
-		data = strings.TrimSpace(data)
-		if data == "[DONE]" {
-			break
-		}
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) != nil || len(chunk.Choices) == 0 {
-			continue
-		}
-		if c := chunk.Choices[0].Delta.Content; c != "" {
-			if _, err := io.WriteString(w, c); err != nil {
-				return err
+		started = true
+	}
+
+	if err == nil {
+		defer sr.Close()
+		for {
+			var m *schema.Message
+			m, err = sr.Recv()
+			if errors.Is(err, io.EOF) {
+				err = nil
+				break
+			}
+			if err != nil {
+				break
+			}
+			if m.Content == "" {
+				continue
+			}
+			start()
+			if _, werr := io.WriteString(w, m.Content); werr != nil {
+				return
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 	}
-	return sc.Err()
+	// 客户端断开（用户打断）时 r.Context() 取消，上游请求随之中止，不算错误。
+	if err != nil && r.Context().Err() == nil {
+		log.Printf("llm: %v", err)
+		start()
+		io.WriteString(w, "\n\n[模型调用失败："+err.Error()+"]")
+	}
 }

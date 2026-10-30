@@ -28,7 +28,8 @@ docker run -p 8080:8080 -e OPENAI_API_KEY=sk-... -e OPENAI_BASE_URL=... -e OPENA
 
 ## 结构
 
-- `main.go`：HTTP 服务，`/api/chat` 面试、`/api/review` 复盘。后端不存状态，前端每次发送完整对话。
-- `llm.go`：调用 OpenAI 兼容接口并把流式输出转发给前端。
-- `prompt.go`：面试官和复盘的提示词，各面试方向的考察重点和面试流程（了解候选人、经历深挖、情景题、反问、收尾）写在这里。
+- `main.go`：HTTP 服务，`/api/chat` 面试、`/api/review` 复盘。后端不存状态，前端每次发送完整对话和上一轮的阶段。
+- `interview.go`：用 [Eino](https://github.com/cloudwego/eino) Graph 编排每一轮面试：评估候选人的回答 → 按评估、轮数和时间决定阶段 → 面试官提问。阶段（了解候选人、经历深挖、情景题、反问、收尾）和每个阶段的时间、轮数上限也在这里。
+- `prompt.go`：评估、面试官和复盘的提示词，以及各面试方向的考察重点。
+- `llm.go`：创建 OpenAI 兼容接口的模型，把流式输出转发给前端。
 - `web/index.html`：整个前端，一个文件。
