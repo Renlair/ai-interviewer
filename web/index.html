@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 面试官</title>
+<style>
+:root { --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #2563eb; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0c0a09; --fg: #f5f5f4; --muted: #a8a29e; --line: #292524; --card: #1c1917; --accent: #60a5fa; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "PingFang SC", sans-serif; }
+main { max-width: 680px; margin: 0 auto; padding: 0 16px; min-height: 100vh; display: flex; flex-direction: column; }
+.center { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 24px; }
+h1 { font-size: 28px; margin: 0; font-weight: 600; }
+.muted { color: var(--muted); }
+button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 10px; padding: 10px 18px; min-height: 44px; }
+button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+button:disabled { opacity: .4; cursor: default; }
+.options { display: flex; flex-wrap: wrap; gap: 10px; }
+.link { border: none; background: none; color: var(--muted); padding: 10px 0; }
+[hidden] { display: none !important; }
+
+#chat { flex: 1; display: flex; flex-direction: column; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--line); }
+#log { flex: 1; padding: 20px 0; display: flex; flex-direction: column; gap: 14px; }
+.msg { white-space: pre-wrap; max-width: 85%; padding: 10px 14px; border-radius: 14px; }
+.msg.assistant { background: var(--card); border: 1px solid var(--line); align-self: flex-start; }
+.msg.user { background: var(--accent); color: #fff; align-self: flex-end; }
+form { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0 16px; display: flex; gap: 8px; }
+textarea { flex: 1; font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; resize: none; }
+#report { white-space: pre-wrap; padding: 20px 0 40px; }
+</style>
+</head>
+<body>
+<main>
+  <section id="start" class="center">
+    <h1>AI 面试官</h1>
+    <p class="muted">像真人一样面你一场，结束后告诉你哪里答得不好。</p>
+    <div><button class="primary" data-go="step">开始</button></div>
+  </section>
+
+  <section id="step" class="center" hidden>
+    <p class="muted" id="step-title"></p>
+    <div class="options" id="step-options"></div>
+    <div><button class="link" id="step-skip" hidden>跳过</button></div>
+  </section>
+
+  <section id="chat" hidden>
+    <header>
+      <span class="muted" id="timer">00:00</span>
+      <button id="end">结束面试</button>
+    </header>
+    <div id="log"></div>
+    <form id="form">
+      <textarea id="input" rows="2" placeholder="输入回答，随时可以打断面试官"></textarea>
+      <button class="primary">发送</button>
+    </form>
+  </section>
+
+  <section id="review" hidden>
+    <header><strong>复盘报告</strong><button data-go="start">再面一场</button></header>
+    <div id="report">正在生成复盘…</div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const STEPS = [
+  { key: 'industry', title: '面试哪个方向？', options: ['计算机 / 互联网'] },
+  { key: 'primary', title: '你的主语言？', options: ['Java', 'Go', 'C++', 'Python', 'JavaScript / TypeScript', 'Rust'] },
+  { key: 'secondary', title: '副语言？', options: ['Java', 'Go', 'C++', 'Python', 'JavaScript / TypeScript', 'Rust'], skippable: true },
+];
+
+let setup, messages, startedAt, timer, controller;
+
+function show(id) {
+  for (const s of document.querySelectorAll('main > section')) s.hidden = s.id !== id;
+}
+
+document.addEventListener('click', e => {
+  const go = e.target.dataset?.go;
+  if (go === 'step') { setup = { secondary: '' }; renderStep(0); }
+  if (go === 'start') show('start');
+});
+
+function renderStep(i) {
+  if (i === STEPS.length) return startInterview();
+  const step = STEPS[i];
+  $('step-title').textContent = step.title;
+  $('step-options').replaceChildren(...step.options
+    .filter(o => o !== setup.primary)
+    .map(o => {
+      const b = document.createElement('button');
+      b.textContent = o;
+      b.onclick = () => { setup[step.key] = o; renderStep(i + 1); };
+      return b;
+    }));
+  $('step-skip').hidden = !step.skippable;
+  $('step-skip').onclick = () => renderStep(i + 1);
+  show('step');
+}
+
+function startInterview() {
+  messages = [];
+  $('log').replaceChildren();
+  startedAt = Date.now();
+  clearInterval(timer);
+  timer = setInterval(() => {
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    $('timer').textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  }, 1000);
+  show('chat');
+  ask();
+}
+
+function bubble(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  $('log').append(div);
+  div.scrollIntoView({ block: 'end' });
+  return div;
+}
+
+// 流式请求；返回完整文本。被 abort 时返回已收到的部分。
+async function streamTo(path, onText) {
+  const ctrl = controller = new AbortController();
+  let text = '';
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ setup, messages: messages.filter(m => m.content), minutes: Math.floor((Date.now() - startedAt) / 60000) }),
+      signal: ctrl.signal,
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      onText(text);
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') onText(text + '\n[网络错误]');
+  }
+  if (controller === ctrl) controller = null;
+  return text;
+}
+
+async function ask() {
+  const div = bubble('assistant', '…');
+  const msg = { role: 'assistant', content: '' };
+  messages.push(msg);
+  const text = await streamTo('/api/chat', t => {
+    if (msg.cut) return;
+    msg.content = t;
+    div.textContent = t.replace('[END]', '').trim();
+    div.scrollIntoView({ block: 'end' });
+  });
+  if (msg.cut) return;
+  msg.content = text.replace('[END]', '').trim();
+  if (text.includes('[END]')) {
+    $('input').disabled = true;
+    $('end').textContent = '查看复盘';
+  }
+}
+
+$('form').onsubmit = e => {
+  e.preventDefault();
+  const text = $('input').value.trim();
+  if (!text) return;
+  // 打断：中止当前输出，保留面试官已说出的部分。
+  if (controller) {
+    controller.abort();
+    const last = messages[messages.length - 1];
+    last.cut = true;
+    last.content = last.content.replace('[END]', '').trim() + '……（被候选人打断）';
+  }
+  $('input').value = '';
+  messages.push({ role: 'user', content: text });
+  bubble('user', text);
+  ask();
+};
+
+$('input').onkeydown = e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('form').requestSubmit(); }
+};
+
+$('end').onclick = async () => {
+  controller?.abort();
+  clearInterval(timer);
+  $('input').disabled = false;
+  $('end').textContent = '结束面试';
+  show('review');
+  $('report').textContent = '正在生成复盘…';
+  await streamTo('/api/review', t => { $('report').textContent = t; });
+};
+</script>
+</body>
+</html>
