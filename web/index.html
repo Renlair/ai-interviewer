@@ -72,6 +72,7 @@ summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
 .lead { font-size: 17px; color: var(--muted); margin: 0 0 32px; }
 .cta { display: flex; flex-wrap: wrap; gap: 12px; }
 .cta [data-soon] { color: var(--muted); }
+#continue { margin-top: 16px; }
 .window { height: 380px; background: var(--card); border-radius: 22px; box-shadow: 0 20px 60px rgb(30 41 59 / .08); padding: 16px 18px; display: flex; flex-direction: column; overflow: hidden; }
 .window-bar { padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); }
 #demo { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 10px; padding-top: 12px; overflow: hidden; }
@@ -127,6 +128,7 @@ summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
           <button data-soon="规划模式">规划模式</button>
           <button data-soon="面试辅导">面试辅导</button>
         </div>
+        <button class="link" id="continue" hidden>继续上次的面试 →</button>
       </div>
       <div class="window" aria-hidden="true">
         <div class="window-bar" id="demo-stage">了解候选人</div>
@@ -217,12 +219,12 @@ document.addEventListener('click', e => {
   if (go === 'history') renderHistory();
 });
 
-// 面试中离开：确认后结束本场，记录存入历史。返回 false 表示用户取消。
+// 面试中离开：暂停并保存，之后可以从首页或历史记录继续。
 function leaveChat() {
-  if (messages.some(m => m.role === 'user') && !confirm('离开会结束这场面试，记录会保存到历史。确定离开吗？')) return false;
   controller?.abort();
   clearInterval(timer);
   saveSession();
+  setCurrent(null); // 主动离开的不在下次打开时自动恢复
   if (answers(session)) remember(session);
   return true;
 }
@@ -262,21 +264,37 @@ function renderStep(i) {
 // ---- 面试 ----
 
 function startInterview() {
-  messages = [];
-  state = null;
-  session = { id: Date.now().toString(36), at: Date.now(), setup, profile: loadProfile(), messages: [], seconds: 0 };
-  $('stage').textContent = '';
-  $('log').replaceChildren();
-  $('input').disabled = false;
-  $('end').textContent = '结束面试';
-  startedAt = Date.now();
-  clearInterval(timer);
-  timer = setInterval(() => {
-    const s = Math.floor((Date.now() - startedAt) / 1000);
-    $('timer').textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-  }, 1000);
-  show('chat');
+  openChat({ id: Date.now().toString(36), at: Date.now(), setup, profile: loadProfile(), messages: [], seconds: 0 });
   ask();
+}
+
+// 继续一场没结束的面试：恢复对话、阶段和已用时间。候选人的回答还没得到回复时，让面试官接着说。
+function resumeInterview(s) {
+  openChat(s);
+  if (messages.at(-1)?.role === 'user') ask();
+}
+
+function openChat(s) {
+  session = s;
+  setup = s.setup;
+  messages = s.messages.map(m => ({ ...m }));
+  state = s.state || null;
+  setCurrent(s.id);
+  $('stage').textContent = state?.name || '';
+  $('log').replaceChildren(...messages.map(m => msgEl(m.role, m.content)));
+  $('input').disabled = !!s.closed;
+  $('end').textContent = s.closed ? '查看复盘' : '结束面试';
+  // 用时只算面试中的时间，暂停期间不计。
+  startedAt = Date.now() - s.seconds * 1000;
+  clearInterval(timer);
+  const tick = () => {
+    const sec = Math.floor((Date.now() - startedAt) / 1000);
+    $('timer').textContent = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+  };
+  tick();
+  timer = setInterval(tick, 1000);
+  show('chat');
+  $('log').scrollTop = $('log').scrollHeight;
 }
 
 // 更新消息并滚到底部；用户往上翻看时（离底部较远）不打扰，除非 force。
@@ -347,11 +365,12 @@ async function ask() {
   });
   if (msg.cut) return;
   msg.content = text.replace('[END]', '').trim();
-  saveSession();
   if (text.includes('[END]')) {
+    session.closed = true;
     $('input').disabled = true;
     $('end').textContent = '查看复盘';
   }
+  saveSession();
 }
 
 $('form').onsubmit = e => {
@@ -369,6 +388,7 @@ $('form').onsubmit = e => {
   grow();
   messages.push({ role: 'user', content: text });
   bubble('user', text);
+  saveSession();
   ask();
 };
 
@@ -387,7 +407,9 @@ $('input').onkeydown = e => {
 $('end').onclick = () => {
   controller?.abort();
   clearInterval(timer);
+  session.ended = true;
   saveSession();
+  setCurrent(null);
   renderReview(session);
 };
 
@@ -413,7 +435,11 @@ const STORE = 'ai-interviewer:history';
 const answers = s => s.messages.filter(m => m.role === 'user').length;
 
 function loadHistory() {
-  try { return JSON.parse(localStorage.getItem(STORE)) || []; } catch { return []; }
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem(STORE)) || []; } catch {}
+  // 加上"继续面试"之前保存的记录没有 state 字段，都当作已结束。
+  for (const s of list) if (!('state' in s)) s.ended = true;
+  return list;
 }
 
 // 更新已有记录时保持原位置，新记录放最前。
@@ -425,13 +451,23 @@ function putHistory(s) {
   try { localStorage.setItem(STORE, JSON.stringify(list)); } catch {}
 }
 
-// 把当前面试写入历史；一句话都没答的不保存。
+// 把当前面试（对话、阶段、用时）写入历史；一句话都没答的不保存。
 function saveSession() {
   if (!session || !messages.some(m => m.role === 'user')) return;
   session.messages = messages.filter(m => m.content).map(({ role, content }) => ({ role, content }));
-  session.seconds = Math.floor((Date.now() - startedAt) / 1000);
+  session.state = state;
+  if (!session.ended) session.seconds = Math.floor((Date.now() - startedAt) / 1000);
   putHistory(session);
 }
+
+// 正在进行的面试 ID：刷新或关掉页面后再打开，直接回到这场面试。
+const CURRENT = 'ai-interviewer:current';
+
+function setCurrent(id) {
+  try { id ? localStorage.setItem(CURRENT, id) : localStorage.removeItem(CURRENT); } catch {}
+}
+
+const unfinished = () => loadHistory().filter(s => !s.ended);
 
 addEventListener('beforeunload', () => { if (visible('chat')) saveSession(); });
 
@@ -446,7 +482,7 @@ function renderHistory() {
     const meta = document.createElement('div');
     meta.className = 'muted';
     const when = new Date(s.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    meta.textContent = `${when} · ${Math.max(1, Math.round(s.seconds / 60))} 分钟 · ${answers(s)} 轮回答 · ${s.report ? '已复盘' : '未复盘'}`;
+    meta.textContent = `${when} · ${Math.max(1, Math.round(s.seconds / 60))} 分钟 · ${answers(s)} 轮回答 · ${!s.ended ? '进行中' : s.report ? '已复盘' : '未复盘'}`;
     info.append(title, meta);
     const del = document.createElement('button');
     del.className = 'link';
@@ -459,7 +495,7 @@ function renderHistory() {
       renderHistory();
     };
     item.append(info, del);
-    item.onclick = () => renderReview(s);
+    item.onclick = () => s.ended ? renderReview(s) : resumeInterview(s);
     return item;
   }));
   if (!list.length) $('history-list').textContent = '还没有面试记录。';
@@ -510,8 +546,11 @@ $('file').onchange = async () => {
 };
 
 function renderStart() {
+  $('continue').hidden = !unfinished().length;
   show('start');
 }
+
+$('continue').onclick = () => resumeInterview(unfinished()[0]);
 
 // ---- 面试记忆：每场面试切块、向量化后存进后端的向量库，以后面试时检索 ----
 
@@ -647,7 +686,10 @@ playDemo();
 
 $('resume').value = loadProfile().resume;
 $('jd').value = loadProfile().jd;
-renderStart();
+let current;
+try { current = localStorage.getItem(CURRENT); } catch {}
+const last = loadHistory().find(s => s.id === current && !s.ended);
+last ? resumeInterview(last) : renderStart();
 </script>
 </body>
 </html>
