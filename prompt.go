@@ -47,7 +47,7 @@ func evaluatorMessages(t *turn) []*schema.Message {
 	if t.Req.State != nil {
 		s = *t.Req.State
 	}
-	cur := stages[min(max(s.Stage, 0), closingStage)]
+	cur := flowFor(t.Req.Setup.Role).stageAt(s.Stage)
 	recent := transcript(t.Req.Messages)
 	recent = recent[max(len(recent)-8, 0):]
 
@@ -129,14 +129,15 @@ func interviewerPrompt(t *turn) string {
 	if domain == "" {
 		domain = "不限"
 	}
-	cur := stages[t.State.Stage]
+	f := flowFor(s.Role)
+	cur := f.stageAt(t.State.Stage)
 
 	var now strings.Builder
 	fmt.Fprintf(&now, "当前阶段：%s。阶段目标：%s\n", cur.Name, cur.Goal)
 	switch {
 	case !hasUserMessage(t.Req.Messages):
-		now.WriteString("这是开场：只说一两句，简单打个招呼，再问一个轻松的问题（比如最近在关注什么样的机会），让候选人先放松。\n")
-	case t.State.Stage == closingStage:
+		fmt.Fprintf(&now, "这是开场：只说一两句，简单打个招呼，然后%s。候选人提供了简历的话，可以从简历里挑一段和这个方向相关的经历来问。语气轻松，让候选人先放松。\n", f.Opening)
+	case t.State.Stage == f.closing():
 		now.WriteString("先简短回应候选人刚才的话，然后感谢候选人、结束面试，不要再提新问题。最后单独一行输出 [END]。\n")
 	case t.Moved:
 		now.WriteString("这一轮刚进入本阶段：先对候选人刚才的话做个自然的回应，再用一句话过渡到本阶段的第一个问题。\n")
@@ -169,10 +170,10 @@ func interviewerPrompt(t *turn) string {
 - 候选人可能打断你：你上一条消息可能只说了一半，直接回应候选人新说的话即可。
 - 只有在收尾阶段才输出 [END]。
 
-这是一场约 %d 分钟的文字面试，现在已经进行了 %d 分钟。面试分为：了解候选人、经历深挖、情景题、反问、收尾，阶段切换由系统控制，你只需要专注当前阶段。
+这是一场约 %d 分钟的文字面试，现在已经进行了 %d 分钟。面试分为：%s，阶段切换由系统控制，你只需要专注当前阶段。
 
 %s`,
-		s.Role, s.Level, domain, focus, material, interviewMinutes, t.Req.Minutes, now.String())
+		s.Role, s.Level, domain, focus, material, interviewMinutes, t.Req.Minutes, f.names(), now.String())
 }
 
 // reviewMessages 把整场对话作为一份记录交给复盘教练。

@@ -34,6 +34,7 @@ button:disabled { opacity: .4; cursor: default; }
 .options button { animation: pop .5s var(--spring) backwards; animation-delay: calc(var(--i, 0) * 40ms); }
 .link { border: none; background: none; color: var(--muted); padding: 10px 0; }
 .link:hover:not(:disabled) { box-shadow: none; color: var(--accent); }
+.step-nav { display: flex; gap: 24px; }
 [hidden] { display: none !important; }
 
 /* 聊天页只有消息列表滚动，输入框始终在底部。 */
@@ -140,7 +141,7 @@ summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
   <section id="step" class="center" hidden>
     <p class="muted" id="step-title"></p>
     <div class="options" id="step-options"></div>
-    <div><button class="link" id="step-skip" hidden>跳过</button></div>
+    <div class="step-nav"><button class="link" id="step-back">← 上一步</button><button class="link" id="step-skip" hidden>跳过</button></div>
   </section>
 
   <section id="chat" hidden>
@@ -208,15 +209,48 @@ function show(id) {
 
 const visible = id => !$(id).hidden;
 
+// ---- 页面地址：每个页面有自己的 #/… 地址，浏览器的后退、前进和刷新都能用 ----
+//   #/  首页          #/setup/<步骤>  选方向       #/interview/<场次>  面试
+//   #/review/<场次>  复盘   #/history  历史记录   #/profile  我的资料
+// 每条浏览记录带上 depth（第几页），"上一步"据此判断能不能直接后退。
+
+function go(hash, replace) {
+  const depth = history.state?.depth || 0;
+  if (replace) history.replaceState({ depth }, '', hash);
+  else if (location.hash !== hash) history.pushState({ depth: depth + 1 }, '', hash);
+  route();
+}
+
+addEventListener('popstate', route);
+
+function route() {
+  const [, page, arg] = location.hash.split('/');
+  const staying = page === 'interview' && arg === session?.id && visible('chat');
+  if (!staying) {
+    if (visible('chat')) leaveChat();
+    controller?.abort(); // 离开复盘页时停止生成
+  }
+  const s = arg && loadHistory().find(x => x.id === arg);
+  switch (page) {
+    case 'setup': return renderStep(Number(arg) || 0);
+    case 'interview':
+      if (!s) return go('#/', true);
+      if (s.ended) return go('#/review/' + s.id, true);
+      return staying || resumeInterview(s);
+    case 'review': return s ? renderReview(s) : go('#/', true);
+    case 'profile': return show('profile');
+    case 'history': return renderHistory();
+    default: return renderStart();
+  }
+}
+
+const LINKS = { home: '#/', step: '#/setup/0', profile: '#/profile', history: '#/history' };
+
 document.addEventListener('click', e => {
-  const go = e.target.closest('[data-go]')?.dataset.go;
-  if (!go) return;
-  if (visible('chat') && !leaveChat()) return;
-  controller?.abort(); // 离开复盘页时停止生成
-  if (go === 'step') { setup = { domain: '' }; renderStep(0); }
-  if (go === 'home') renderStart();
-  if (go === 'profile') show('profile');
-  if (go === 'history') renderHistory();
+  const to = e.target.closest('[data-go]')?.dataset.go;
+  if (!to) return;
+  if (to === 'step') saveDraft({ domain: '' }); // 每次从头选方向
+  go(LINKS[to]);
 });
 
 // 面试中离开：暂停并保存，之后可以从首页或历史记录继续。
@@ -225,8 +259,7 @@ function leaveChat() {
   clearInterval(timer);
   saveSession();
   setCurrent(null); // 主动离开的不在下次打开时自动恢复
-  if (answers(session)) remember(session);
-  return true;
+  if (answers(session) && !session.ended) remember(session);
 }
 
 // ---- 回到顶部 ----
@@ -245,33 +278,58 @@ $('top').onclick = () => scroller().scrollTo({ top: 0, behavior: 'smooth' });
 
 // ---- 选方向 ----
 
+// 选到一半的方向存在 sessionStorage，刷新后还在。
+const DRAFT = 'ai-interviewer:setup';
+
+function loadDraft() {
+  try { return JSON.parse(sessionStorage.getItem(DRAFT)) || { domain: '' }; } catch { return { domain: '' }; }
+}
+
+function saveDraft(d) {
+  try { sessionStorage.setItem(DRAFT, JSON.stringify(d)); } catch {}
+}
+
 function renderStep(i) {
-  if (i === STEPS.length) return startInterview();
+  setup = loadDraft();
+  // 直接打开后面的步骤、但前面还没选时，回到第一个没选的步骤。
+  const missing = STEPS.findIndex(st => !st.skippable && !setup[st.key]);
+  if (missing >= 0 && missing < i) return go('#/setup/' + missing, true);
+  if (i >= STEPS.length) return startInterview();
+
   const step = STEPS[i];
+  const next = () => i + 1 === STEPS.length ? startInterview() : go('#/setup/' + (i + 1));
   $('step-title').textContent = step.title;
   $('step-options').replaceChildren(...step.options.map((o, idx) => {
     const b = document.createElement('button');
     b.style.setProperty('--i', idx);
     b.textContent = o;
-    b.onclick = () => { setup[step.key] = o; renderStep(i + 1); };
+    if (setup[step.key] === o) b.className = 'primary'; // 后退回来时标出之前的选择
+    b.onclick = () => { setup[step.key] = o; saveDraft(setup); next(); };
     return b;
   }));
   $('step-skip').hidden = !step.skippable;
-  $('step-skip').onclick = () => renderStep(i + 1);
+  $('step-skip').onclick = () => { setup[step.key] = ''; saveDraft(setup); next(); };
+  // 上一步：前面还有本应用的页面就直接后退，否则（比如刷新后直接打开）跳到上一步的地址。
+  $('step-back').onclick = () => history.state?.depth > 0 ? history.back() : go(i ? '#/setup/' + (i - 1) : '#/', true);
   show('step');
 }
 
 // ---- 面试 ----
 
+// 新建一场面试并先存进历史，这样刚开场就刷新也能回来。
 function startInterview() {
-  openChat({ id: Date.now().toString(36), at: Date.now(), setup, profile: loadProfile(), messages: [], seconds: 0 });
-  ask();
+  const s = { id: Date.now().toString(36), at: Date.now(), setup, profile: loadProfile(), messages: [], seconds: 0, state: null };
+  // 清掉以前开了个头、一句没答的面试。
+  try { localStorage.setItem(STORE, JSON.stringify(loadHistory().filter(x => x.ended || answers(x)))); } catch {}
+  putHistory(s);
+  go('#/interview/' + s.id);
 }
 
-// 继续一场没结束的面试：恢复对话、阶段和已用时间。候选人的回答还没得到回复时，让面试官接着说。
+// 打开一场没结束的面试：恢复对话、阶段和已用时间。
+// 还没开场，或者候选人的回答还没得到回复时，让面试官接着说。
 function resumeInterview(s) {
   openChat(s);
-  if (messages.at(-1)?.role === 'user') ask();
+  if (!messages.length || messages.at(-1).role === 'user') ask();
 }
 
 function openChat(s) {
@@ -409,8 +467,7 @@ $('end').onclick = () => {
   clearInterval(timer);
   session.ended = true;
   saveSession();
-  setCurrent(null);
-  renderReview(session);
+  go('#/review/' + session.id, true); // 替换掉面试页，后退不会再回到已结束的面试
 };
 
 // ---- 复盘 ----
@@ -451,9 +508,9 @@ function putHistory(s) {
   try { localStorage.setItem(STORE, JSON.stringify(list)); } catch {}
 }
 
-// 把当前面试（对话、阶段、用时）写入历史；一句话都没答的不保存。
+// 把当前面试（对话、阶段、用时）写入历史。
 function saveSession() {
-  if (!session || !messages.some(m => m.role === 'user')) return;
+  if (!session) return;
   session.messages = messages.filter(m => m.content).map(({ role, content }) => ({ role, content }));
   session.state = state;
   if (!session.ended) session.seconds = Math.floor((Date.now() - startedAt) / 1000);
@@ -467,12 +524,12 @@ function setCurrent(id) {
   try { id ? localStorage.setItem(CURRENT, id) : localStorage.removeItem(CURRENT); } catch {}
 }
 
-const unfinished = () => loadHistory().filter(s => !s.ended);
+const unfinished = () => loadHistory().filter(s => !s.ended && answers(s));
 
 addEventListener('beforeunload', () => { if (visible('chat')) saveSession(); });
 
 function renderHistory() {
-  const list = loadHistory();
+  const list = loadHistory().filter(s => s.ended || answers(s));
   $('history-list').replaceChildren(...list.map(s => {
     const item = document.createElement('div');
     item.className = 'record';
@@ -495,7 +552,7 @@ function renderHistory() {
       renderHistory();
     };
     item.append(info, del);
-    item.onclick = () => s.ended ? renderReview(s) : resumeInterview(s);
+    item.onclick = () => go((s.ended ? '#/review/' : '#/interview/') + s.id);
     return item;
   }));
   if (!list.length) $('history-list').textContent = '还没有面试记录。';
@@ -550,7 +607,7 @@ function renderStart() {
   show('start');
 }
 
-$('continue').onclick = () => resumeInterview(unfinished()[0]);
+$('continue').onclick = () => go('#/interview/' + unfinished()[0].id);
 
 // ---- 面试记忆：每场面试切块、向量化后存进后端的向量库，以后面试时检索 ----
 
@@ -686,10 +743,12 @@ playDemo();
 
 $('resume').value = loadProfile().resume;
 $('jd').value = loadProfile().jd;
+// 不带地址打开时，如果上次关页面时正在面试，直接回到那场面试。
 let current;
 try { current = localStorage.getItem(CURRENT); } catch {}
 const last = loadHistory().find(s => s.id === current && !s.ended);
-last ? resumeInterview(last) : renderStart();
+history.replaceState({ depth: 0 }, '', location.hash.length > 2 ? location.hash : last ? '#/interview/' + last.id : '#/');
+route();
 </script>
 </body>
 </html>

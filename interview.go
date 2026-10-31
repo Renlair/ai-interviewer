@@ -12,27 +12,9 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// stage 是面试的一个阶段。阶段由后端按规则推进，模型只负责评估和提问。
-type stage struct {
-	Name     string
-	Goal     string
-	EndMin   int // 面试进行到这一分钟仍在本阶段，就进入下一阶段
-	MaxTurns int // 候选人在本阶段最多回答几轮
-}
-
-var stages = []stage{
-	{"了解候选人", "了解候选人想去的岗位、背景和做过的事，找到一段值得深挖的经历。不要让候选人做正式的自我介绍，在聊天中自然问出来。", 5, 3},
-	{"经历深挖", "挑候选人提到的一段经历，问背后的业务目标、为什么这么做、怎么衡量效果、他自己做了哪些判断和取舍。", 15, 6},
-	{"情景题", "结合方向和业务领域出一道开放题（比如设计一个功能、做一个架构决策、处理一次团队分歧），看思路和取舍，不追求标准答案。", 25, 6},
-	{"反问", "问候选人有没有想问你的，简短真诚地回答。", 29, 3},
-	{"收尾", "感谢候选人，告诉他稍后可以查看复盘。", 0, 0},
-}
-
-var closingStage = len(stages) - 1
-
 // interviewState 由前端保存，每轮随请求带回，后端不存状态。
 type interviewState struct {
-	Stage int    `json:"stage"` // stages 下标
+	Stage int    `json:"stage"` // 当前方向流程里的阶段下标
 	Turns int    `json:"turns"` // 候选人在当前阶段已回答的轮数
 	Name  string `json:"name"`  // 阶段名，只用于前端展示
 }
@@ -136,22 +118,23 @@ func newInterviewGraph(ctx context.Context, evaluator, interviewer model.BaseCha
 
 // decide 按评估结果、轮数和时间决定本轮所处的阶段。
 func decide(t *turn) {
+	f := flowFor(t.Req.Setup.Role)
 	s := interviewState{}
 	if t.Req.State != nil {
 		s = *t.Req.State
 	}
-	s.Stage = min(max(s.Stage, 0), closingStage)
+	s.Stage = min(max(s.Stage, 0), f.closing())
 
-	if prev := s.Stage; hasUserMessage(t.Req.Messages) && s.Stage != closingStage {
+	if prev := s.Stage; hasUserMessage(t.Req.Messages) && s.Stage != f.closing() {
 		s.Turns++
-		cur := stages[s.Stage]
+		cur := f.Stages[s.Stage]
 		switch {
 		case t.Eval.WantsToEnd:
-			s.Stage = closingStage
+			s.Stage = f.closing()
 		case t.Eval.StageDone, s.Turns >= cur.MaxTurns, t.Req.Minutes >= cur.EndMin:
 			s.Stage++
 			// 时间不够时跳过已经超时的阶段，直接进入反问 / 收尾。
-			for s.Stage < closingStage && t.Req.Minutes >= stages[s.Stage].EndMin {
+			for s.Stage < f.closing() && t.Req.Minutes >= f.Stages[s.Stage].EndMin {
 				s.Stage++
 			}
 		}
@@ -160,7 +143,7 @@ func decide(t *turn) {
 			t.Moved = true
 		}
 	}
-	s.Name = stages[s.Stage].Name
+	s.Name = f.Stages[s.Stage].Name
 	t.State = s
 }
 
